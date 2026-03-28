@@ -1,5 +1,21 @@
 # Instructions
 
+## Proyecto
+
+Este es **QoriERP** — sistema ERP multitenant para PyMEs de Bolivia/Latam.
+
+Al iniciar una sesión, leer siempre:
+- `.claude/docs/qoriERP_contexto.md` — visión, stack, módulos y orden de desarrollo
+
+Cargar sub-documentos solo cuando sean relevantes a la tarea:
+- `arch/` — decisiones de arquitectura (multitenancy, auth)
+- `modules/<modulo>.md` — spec del módulo en el que se trabaja
+- `schema/tables.md` — referencia de tablas al implementar queries
+
+Specs técnicos detallados en engram — buscar por topic key (ej: `sdd/decisions/self-hosted-auth`).
+
+---
+
 ## Rules
 
 - NEVER add "Co-Authored-By" or any AI attribution to commits. Use conventional commits format only.
