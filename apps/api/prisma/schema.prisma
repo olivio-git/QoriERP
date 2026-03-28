@@ -1,0 +1,1131 @@
+// ============================================================
+// QoriERP — Prisma Schema
+// Stack: PostgreSQL + RLS | Multitenancy por tenant_id en sesión
+// Nota: RLS se aplica via SET LOCAL app.tenant_id en cada request
+// Ver: apps/api/prisma/rls.sql para las políticas RLS
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum DeploymentMode {
+  saas
+  self_hosted
+}
+
+enum Plan {
+  free
+  starter
+  pro
+  enterprise
+}
+
+enum TipoNegocio {
+  licorera_minimarket
+  ferreteria
+  autopartes
+  farmacia
+  ropa_calzado
+  restaurante
+  supermercado
+  otro
+}
+
+enum MetodoValuacion {
+  PEPS // FIFO
+  UEPS // LIFO
+  CPP  // Costo Promedio Ponderado
+}
+
+enum TipoProducto {
+  producto_final  // Se vende, puede tener receta
+  sub_producto    // Producción interna, no se vende solo
+  insumo_directo  // Se compra y consume en producción
+  reventa         // Compra y vende sin transformación
+}
+
+enum UnidadMedida {
+  unidad
+  caja
+  paquete
+  pieza
+  kg
+  gr
+  litro
+  ml
+  docena
+  metro
+  otro
+}
+
+enum EstadoTransferencia {
+  SOLICITADA
+  APROBADA
+  EN_TRANSITO
+  RECIBIDA
+  RECHAZADA
+}
+
+enum EstadoCompra {
+  PENDIENTE
+  PAGADA
+  PARCIAL
+  ANULADA
+}
+
+enum EstadoVenta {
+  PENDIENTE
+  PAGADA
+  PARCIAL
+  ANULADA
+}
+
+enum EstadoCotizacion {
+  ACTIVA
+  CONVERTIDA
+  VENCIDA
+  ANULADA
+}
+
+enum EstadoPedido {
+  BORRADOR
+  ENVIADO
+  EN_TRANSITO
+  PARCIALMENTE_RECIBIDO
+  COMPLETADO
+  CANCELADO
+}
+
+enum MetodoPago {
+  efectivo
+  tarjeta
+  transferencia
+  qr
+  credito
+}
+
+enum EntidadPago {
+  venta
+  compra
+  cxc
+  cxp
+  devolucion
+}
+
+enum EstadoCuentaCobrar {
+  al_dia
+  por_vencer
+  vencido
+  pagada
+}
+
+enum EstadoCuentaPagar {
+  pendiente
+  parcial
+  pagada
+  vencida
+}
+
+enum TipoAjusteInventario {
+  positivo // Bonificación proveedor, carga inicial
+  negativo // Merma, vencido, pérdida
+}
+
+enum TipoMovimientoCaja {
+  ingreso
+  egreso
+}
+
+enum TipoCambio {
+  oficial
+  paralelo
+  personalizado
+}
+
+enum TipoDevolucion {
+  cambio
+  reembolso
+}
+
+enum CondicionDevolucion {
+  resaleable
+  danado
+  vencido
+}
+
+enum EstadoDevolucion {
+  PENDIENTE
+  PROCESADA
+  ANULADA
+}
+
+enum EntidadAnulacion {
+  venta
+  compra
+  transferencia
+  pedido
+  cotizacion
+  devolucion
+}
+
+enum TipoChatMensaje {
+  texto
+  solicitud_transferencia
+}
+
+enum Rol {
+  admin
+  cajero
+}
+
+enum Moneda {
+  BOB
+  USD
+  ARS
+  BRL
+  PEN
+  CLP
+  COP
+  EUR
+}
+
+// ============================================================
+// PLATAFORMA — Sin RLS (tablas globales)
+// ============================================================
+
+/// Tabla global de tenants. Sin tenant_id, sin RLS.
+/// Accesible solo con rol de plataforma (BYPASSRLS).
+model Tenant {
+  id             String         @id @default(uuid()) @db.Uuid
+  nombre         String
+  slug           String         @unique
+  plan           Plan           @default(starter)
+  deploymentMode DeploymentMode @default(saas)
+  activo         Boolean        @default(true)
+  createdAt      DateTime       @default(now()) @map("created_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
+
+  @@map("tenants")
+}
+
+// ============================================================
+// CONFIGURACIÓN DEL TENANT
+// ============================================================
+
+/// Una fila por tenant. Controla módulos activos, método de valuación, moneda base.
+model Configuracion {
+  id                  String          @id @default(uuid()) @db.Uuid
+  tenantId            String          @db.Uuid @map("tenant_id")
+  tipoNegocio         TipoNegocio
+  monedaBase          Moneda          @default(BOB) @map("moneda_base")
+  metodoValuacion     MetodoValuacion @default(CPP) @map("metodo_valuacion")
+  modulosActivos      Json            @default("[]") @map("modulos_activos")
+  diasAlertaVenc      Int             @default(30) @map("dias_alerta_venc")
+  bloquearCxcVencida  Boolean         @default(false) @map("bloquear_cxc_vencida")
+  diasPorVencer       Int             @default(7) @map("dias_por_vencer")
+  createdAt           DateTime        @default(now()) @map("created_at")
+  updatedAt           DateTime        @updatedAt @map("updated_at")
+
+  @@unique([tenantId])
+  @@index([tenantId])
+  @@map("configuracion")
+}
+
+// ============================================================
+// SUCURSALES
+// ============================================================
+
+model Sucursal {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @db.Uuid @map("tenant_id")
+  nombre    String
+  direccion String?
+  telefono  String?
+  esCentral Boolean  @default(false) @map("es_central")
+  activo    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  usuarios              UsuarioSucursal[]
+  lotes                 Lote[]
+  ventas                Venta[]
+  compras               Compra[]
+  cajaSesiones          CajaSesion[]
+  ajustes               AjusteInventario[]
+  transferenciasOrigen  Transferencia[]   @relation("TransferenciaOrigen")
+  transferenciasDest    Transferencia[]   @relation("TransferenciaDestino")
+  pagos                 Pago[]
+  cuentasCobrar         CuentaCobrar[]
+  pedidos               Pedido[]
+  devoluciones          Devolucion[]
+  cotizaciones          Cotizacion[]
+  anulaciones           Anulacion[]
+  chatMensajes          ChatMensaje[]     @relation("MensajesSucursal")
+
+  @@index([tenantId])
+  @@index([tenantId, esCentral])
+  @@map("sucursales")
+}
+
+// ============================================================
+// USUARIOS Y PERMISOS
+// ============================================================
+
+model Usuario {
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @db.Uuid @map("tenant_id")
+  nombre       String
+  username     String
+  hashPassword String   @map("hash_password")
+  rol          Rol      @default(cajero)
+  activo       Boolean  @default(true)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  sucursales                UsuarioSucursal[]
+  ventasRegistradas         Venta[]
+  comprasRegistradas        Compra[]
+  pagosRegistrados          Pago[]
+  ajustesRegistrados        AjusteInventario[]
+  tiposCambioRegistrados    TipoCambio_[]
+  pedidosCreados            Pedido[]            @relation("PedidoCreador")
+  devolucionesAtendidas     Devolucion[]
+  anulaciones               Anulacion[]
+  transferenciasSolicitadas Transferencia[]     @relation("TransferenciaSolicitante")
+  transferenciasDespachadas Transferencia[]     @relation("TransferenciasDespachador")
+  transferenciasRecibidas   Transferencia[]     @relation("TransferenciasReceptor")
+  cotizacionesCreadas       Cotizacion[]
+  mensajesEnviados          ChatMensaje[]
+
+  @@unique([tenantId, username])
+  @@index([tenantId])
+  @@index([tenantId, rol])
+  @@map("usuarios")
+}
+
+/// Relación N:M entre usuarios y sucursales
+model UsuarioSucursal {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @db.Uuid @map("tenant_id")
+  usuarioId  String   @db.Uuid @map("usuario_id")
+  sucursalId String   @db.Uuid @map("sucursal_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  usuario  Usuario  @relation(fields: [usuarioId], references: [id])
+  sucursal Sucursal @relation(fields: [sucursalId], references: [id])
+
+  @@unique([tenantId, usuarioId, sucursalId])
+  @@index([tenantId])
+  @@index([tenantId, usuarioId])
+  @@index([tenantId, sucursalId])
+  @@map("usuarios_sucursales")
+}
+
+/// Permisos granulares por rol y módulo dentro del tenant
+model RolPermiso {
+  id          String  @id @default(uuid()) @db.Uuid
+  tenantId    String  @db.Uuid @map("tenant_id")
+  rol         Rol
+  modulo      String
+  puedeVer    Boolean @default(true) @map("puede_ver")
+  puedeEditar Boolean @default(false) @map("puede_editar")
+
+  @@unique([tenantId, rol, modulo])
+  @@index([tenantId])
+  @@index([tenantId, rol])
+  @@map("roles_permisos")
+}
+
+// ============================================================
+// MAESTROS
+// ============================================================
+
+/// Categorías anidadas (árbol con parent_id)
+model Categoria {
+  id       String      @id @default(uuid()) @db.Uuid
+  tenantId String      @db.Uuid @map("tenant_id")
+  nombre   String
+  parentId String?     @db.Uuid @map("parent_id")
+
+  parent   Categoria?  @relation("CategoriaHijos", fields: [parentId], references: [id])
+  hijos    Categoria[] @relation("CategoriaHijos")
+  productos Producto[]
+
+  @@index([tenantId])
+  @@index([tenantId, parentId])
+  @@map("categorias")
+}
+
+model Proveedor {
+  id        String    @id @default(uuid()) @db.Uuid
+  tenantId  String    @db.Uuid @map("tenant_id")
+  nombre    String
+  nitCi     String?   @map("nit_ci")
+  telefono  String?
+  email     String?
+  activo    Boolean   @default(true)
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  compras Compra[]
+  lotes   Lote[]
+  pedidos Pedido[]
+
+  @@index([tenantId])
+  @@index([tenantId, nitCi])
+  @@map("proveedores")
+}
+
+model Cliente {
+  id        String    @id @default(uuid()) @db.Uuid
+  tenantId  String    @db.Uuid @map("tenant_id")
+  nombre    String
+  nitCi     String?   @map("nit_ci")
+  telefono  String?
+  whatsapp  String?
+  activo    Boolean   @default(true)
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  ventas        Venta[]
+  cotizaciones  Cotizacion[]
+  cuentasCobrar CuentaCobrar[]
+  devoluciones  Devolucion[]
+
+  @@index([tenantId])
+  @@index([tenantId, nitCi])
+  @@map("clientes")
+}
+
+model Producto {
+  id               String       @id @default(uuid()) @db.Uuid
+  tenantId         String       @db.Uuid @map("tenant_id")
+  nombre           String
+  tipo             TipoProducto @default(reventa)
+  categoriaId      String?      @db.Uuid @map("categoria_id")
+  marca            String?
+  unidadMedida     UnidadMedida @default(unidad) @map("unidad_medida")
+  factorConversion Decimal?     @map("factor_conversion") @db.Decimal(10, 4)
+  codigoBarras     String?      @map("codigo_barras")
+  esPerecedero     Boolean      @default(false) @map("es_perecedero")
+  diasAlerta       Int?         @map("dias_alerta")
+  stockMinimo      Decimal?     @map("stock_minimo") @db.Decimal(12, 4)
+  stockMaximo      Decimal?     @map("stock_maximo") @db.Decimal(12, 4)
+  imagenUrl        String?      @map("imagen_url")
+  activo           Boolean      @default(true)
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+
+  categoria         Categoria?         @relation(fields: [categoriaId], references: [id])
+  atributos         ProductoAtributo[]
+  precios           ProductoPrecio?
+  lotes             Lote[]
+  recetasPadre      RecetaItem[]       @relation("RecetaPadre")
+  recetasHijo       RecetaItem[]       @relation("RecetaHijo")
+  ventaItems        VentaItem[]
+  compraItems       CompraItem[]
+  ajustes           AjusteInventario[]
+  transferenciaItems TransferenciaItem[]
+  pedidoItems       PedidoItem[]
+  devolucionItems   DevolucionItem[]
+  devolucionCambios DevolucionCambio[]
+  cotizacionItems   CotizacionItem[]
+
+  @@index([tenantId])
+  @@index([tenantId, tipo])
+  @@index([tenantId, categoriaId])
+  @@index([tenantId, codigoBarras])
+  @@index([tenantId, activo])
+  @@map("productos")
+}
+
+/// Atributos flexibles clave-valor por rubro (talla, color, código OEM, etc.)
+model ProductoAtributo {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @db.Uuid @map("tenant_id")
+  productoId String   @db.Uuid @map("producto_id")
+  clave      String
+  valor      String
+
+  producto Producto @relation(fields: [productoId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, productoId])
+  @@index([tenantId, productoId, clave])
+  @@map("producto_atributos")
+}
+
+/// Precio de venta y costo promedio separados del producto principal.
+/// CPP actualiza costo_promedio frecuentemente sin alterar el producto.
+model ProductoPrecio {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenantId      String   @db.Uuid @map("tenant_id")
+  productoId    String   @db.Uuid @map("producto_id") @unique
+  precioVenta   Decimal  @map("precio_venta") @db.Decimal(12, 2)
+  costoPromedio Decimal  @default(0) @map("costo_promedio") @db.Decimal(12, 4)
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  producto Producto @relation(fields: [productoId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, productoId])
+  @@map("producto_precios")
+}
+
+// ============================================================
+// INVENTARIO
+// ============================================================
+
+/// Un lote por ingreso de compra. Soporta PEPS/UEPS/CPP.
+/// Stock real = SUM(cantidad) WHERE sucursal_id=X AND producto_id=Y
+model Lote {
+  id               String    @id @default(uuid()) @db.Uuid
+  tenantId         String    @db.Uuid @map("tenant_id")
+  sucursalId       String    @db.Uuid @map("sucursal_id")
+  productoId       String    @db.Uuid @map("producto_id")
+  cantidad         Decimal   @db.Decimal(12, 4)
+  costoUnitario    Decimal   @map("costo_unitario") @db.Decimal(12, 4)
+  monedaOrigen     Moneda    @default(BOB) @map("moneda_origen")
+  costoUnitOrigen  Decimal?  @map("costo_unit_origen") @db.Decimal(12, 4)
+  fechaVencimiento DateTime? @map("fecha_vencimiento") @db.Date
+  fechaIngreso     DateTime  @default(now()) @map("fecha_ingreso")
+  proveedorId      String?   @db.Uuid @map("proveedor_id")
+  compraId         String?   @db.Uuid @map("compra_id")
+
+  sucursal           Sucursal    @relation(fields: [sucursalId], references: [id])
+  producto           Producto    @relation(fields: [productoId], references: [id])
+  proveedor          Proveedor?  @relation(fields: [proveedorId], references: [id])
+  compraItems        CompraItem[]
+  transferenciaItems TransferenciaItem[]
+  devolucionItems    DevolucionItem[]
+
+  @@index([tenantId])
+  @@index([tenantId, sucursalId, productoId])
+  @@index([tenantId, productoId, fechaIngreso])
+  @@index([tenantId, productoId, fechaVencimiento])
+  @@index([tenantId, sucursalId])
+  @@map("lotes")
+}
+
+/// BOM recursivo: un producto puede contener sub-productos o insumos.
+/// IMPORTANTE: Validar ausencia de ciclos al guardar (DFS).
+model RecetaItem {
+  id              String       @id @default(uuid()) @db.Uuid
+  tenantId        String       @db.Uuid @map("tenant_id")
+  productoPadreId String       @db.Uuid @map("producto_padre_id")
+  productoHijoId  String       @db.Uuid @map("producto_hijo_id")
+  cantidad        Decimal      @db.Decimal(12, 4)
+  unidadMedida    UnidadMedida @map("unidad_medida")
+
+  productoPadre Producto @relation("RecetaPadre", fields: [productoPadreId], references: [id])
+  productoHijo  Producto @relation("RecetaHijo", fields: [productoHijoId], references: [id])
+
+  @@unique([tenantId, productoPadreId, productoHijoId])
+  @@index([tenantId])
+  @@index([tenantId, productoPadreId])
+  @@map("receta_items")
+}
+
+/// Ajustes manuales de inventario con motivo obligatorio
+model AjusteInventario {
+  id         String               @id @default(uuid()) @db.Uuid
+  tenantId   String               @db.Uuid @map("tenant_id")
+  sucursalId String               @db.Uuid @map("sucursal_id")
+  productoId String               @db.Uuid @map("producto_id")
+  tipo       TipoAjusteInventario
+  cantidad   Decimal              @db.Decimal(12, 4)
+  motivo     String
+  usuarioId  String               @db.Uuid @map("usuario_id")
+  fecha      DateTime             @default(now())
+  notas      String?
+
+  sucursal Sucursal @relation(fields: [sucursalId], references: [id])
+  producto Producto @relation(fields: [productoId], references: [id])
+  usuario  Usuario  @relation(fields: [usuarioId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, sucursalId])
+  @@index([tenantId, productoId])
+  @@index([tenantId, fecha])
+  @@map("ajustes_inventario")
+}
+
+// ============================================================
+// TIPOS DE CAMBIO
+// ============================================================
+
+/// Historial de tasas registradas manualmente por el admin.
+/// Nombre con _ para evitar colisión con el enum TipoCambio.
+model TipoCambio_ {
+  id        String     @id @default(uuid()) @db.Uuid
+  tenantId  String     @db.Uuid @map("tenant_id")
+  moneda    Moneda
+  tasa      Decimal    @db.Decimal(12, 6)
+  tipo      TipoCambio
+  fecha     DateTime   @default(now())
+  usuarioId String     @db.Uuid @map("usuario_id")
+  notas     String?
+
+  usuario Usuario @relation(fields: [usuarioId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, moneda, fecha])
+  @@map("tipos_cambio")
+}
+
+// ============================================================
+// COMPRAS
+// ============================================================
+
+model Compra {
+  id          String       @id @default(uuid()) @db.Uuid
+  tenantId    String       @db.Uuid @map("tenant_id")
+  sucursalId  String       @db.Uuid @map("sucursal_id")
+  proveedorId String       @db.Uuid @map("proveedor_id")
+  fecha       DateTime     @default(now())
+  totalBob    Decimal      @map("total_bob") @db.Decimal(14, 2)
+  moneda      Moneda       @default(BOB)
+  tipoCambio  Decimal      @default(1) @map("tipo_cambio") @db.Decimal(12, 6)
+  estado      EstadoCompra @default(PENDIENTE)
+  pedidoId    String?      @db.Uuid @map("pedido_id")
+  usuarioId   String       @db.Uuid @map("usuario_id")
+  notas       String?
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime     @updatedAt @map("updated_at")
+
+  sucursal    Sucursal     @relation(fields: [sucursalId], references: [id])
+  proveedor   Proveedor    @relation(fields: [proveedorId], references: [id])
+  usuario     Usuario      @relation(fields: [usuarioId], references: [id])
+  items       CompraItem[]
+  pagos       Pago[]       @relation("PagosCompra")
+  cuentaPagar CuentaPagar?
+  pedido      Pedido?      @relation(fields: [pedidoId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, sucursalId])
+  @@index([tenantId, proveedorId])
+  @@index([tenantId, fecha])
+  @@index([tenantId, estado])
+  @@map("compras")
+}
+
+model CompraItem {
+  id              String   @id @default(uuid()) @db.Uuid
+  tenantId        String   @db.Uuid @map("tenant_id")
+  compraId        String   @db.Uuid @map("compra_id")
+  productoId      String   @db.Uuid @map("producto_id")
+  loteId          String?  @db.Uuid @map("lote_id")
+  cantidad        Decimal  @db.Decimal(12, 4)
+  costoUnitOrigen Decimal  @map("costo_unit_origen") @db.Decimal(12, 4)
+  costoUnitBob    Decimal  @map("costo_unit_bob") @db.Decimal(12, 4)
+
+  compra   Compra   @relation(fields: [compraId], references: [id])
+  producto Producto @relation(fields: [productoId], references: [id])
+  lote     Lote?    @relation(fields: [loteId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, compraId])
+  @@index([tenantId, productoId])
+  @@map("compra_items")
+}
+
+model CuentaPagar {
+  id               String            @id @default(uuid()) @db.Uuid
+  tenantId         String            @db.Uuid @map("tenant_id")
+  compraId         String            @db.Uuid @map("compra_id") @unique
+  montoTotal       Decimal           @map("monto_total") @db.Decimal(14, 2)
+  montoPagado      Decimal           @default(0) @map("monto_pagado") @db.Decimal(14, 2)
+  fechaVencimiento DateTime          @map("fecha_vencimiento") @db.Date
+  estado           EstadoCuentaPagar @default(pendiente)
+  createdAt        DateTime          @default(now()) @map("created_at")
+  updatedAt        DateTime          @updatedAt @map("updated_at")
+
+  compra Compra @relation(fields: [compraId], references: [id])
+  pagos  Pago[] @relation("PagosCxP")
+
+  @@index([tenantId])
+  @@index([tenantId, estado])
+  @@index([tenantId, fechaVencimiento])
+  @@map("cuentas_pagar")
+}
+
+// ============================================================
+// VENTAS
+// ============================================================
+
+model Venta {
+  id           String      @id @default(uuid()) @db.Uuid
+  tenantId     String      @db.Uuid @map("tenant_id")
+  sucursalId   String      @db.Uuid @map("sucursal_id")
+  clienteId    String?     @db.Uuid @map("cliente_id")
+  fecha        DateTime    @default(now())
+  total        Decimal     @db.Decimal(14, 2)
+  descuento    Decimal     @default(0) @db.Decimal(14, 2)
+  estado       EstadoVenta @default(PENDIENTE)
+  sesionCajaId String?     @db.Uuid @map("sesion_caja_id")
+  usuarioId    String      @db.Uuid @map("usuario_id")
+  notas        String?
+  createdAt    DateTime    @default(now()) @map("created_at")
+  updatedAt    DateTime    @updatedAt @map("updated_at")
+
+  sucursal     Sucursal    @relation(fields: [sucursalId], references: [id])
+  cliente      Cliente?    @relation(fields: [clienteId], references: [id])
+  usuario      Usuario     @relation(fields: [usuarioId], references: [id])
+  sesionCaja   CajaSesion? @relation(fields: [sesionCajaId], references: [id])
+  items        VentaItem[]
+  pagos        Pago[]      @relation("PagosVenta")
+  cuentaCobrar CuentaCobrar?
+  devoluciones Devolucion[]
+
+  @@index([tenantId])
+  @@index([tenantId, sucursalId])
+  @@index([tenantId, clienteId])
+  @@index([tenantId, fecha])
+  @@index([tenantId, estado])
+  @@index([tenantId, sesionCajaId])
+  @@map("ventas")
+}
+
+model VentaItem {
+  id             String   @id @default(uuid()) @db.Uuid
+  tenantId       String   @db.Uuid @map("tenant_id")
+  ventaId        String   @db.Uuid @map("venta_id")
+  productoId     String   @db.Uuid @map("producto_id")
+  cantidad       Decimal  @db.Decimal(12, 4)
+  precioUnitario Decimal  @map("precio_unitario") @db.Decimal(12, 2)
+  descuento      Decimal  @default(0) @db.Decimal(12, 2)
+  costoUnitario  Decimal  @map("costo_unitario") @db.Decimal(12, 4) // Snapshot al momento de venta
+
+  venta    Venta    @relation(fields: [ventaId], references: [id])
+  producto Producto @relation(fields: [productoId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, ventaId])
+  @@index([tenantId, productoId])
+  @@map("venta_items")
+}
+
+model Cotizacion {
+  id               String           @id @default(uuid()) @db.Uuid
+  tenantId         String           @db.Uuid @map("tenant_id")
+  sucursalId       String           @db.Uuid @map("sucursal_id")
+  clienteId        String?          @db.Uuid @map("cliente_id")
+  fecha            DateTime         @default(now())
+  fechaVencimiento DateTime         @map("fecha_vencimiento") @db.Date
+  total            Decimal          @db.Decimal(14, 2)
+  estado           EstadoCotizacion @default(ACTIVA)
+  ventaId          String?          @db.Uuid @map("venta_id")
+  usuarioId        String           @db.Uuid @map("usuario_id")
+  notas            String?
+  createdAt        DateTime         @default(now()) @map("created_at")
+
+  sucursal Sucursal         @relation(fields: [sucursalId], references: [id])
+  cliente  Cliente?         @relation(fields: [clienteId], references: [id])
+  usuario  Usuario          @relation(fields: [usuarioId], references: [id])
+  items    CotizacionItem[]
+
+  @@index([tenantId])
+  @@index([tenantId, sucursalId])
+  @@index([tenantId, clienteId])
+  @@index([tenantId, estado])
+  @@index([tenantId, fechaVencimiento])
+  @@map("cotizaciones")
+}
+
+model CotizacionItem {
+  id             String   @id @default(uuid()) @db.Uuid
+  tenantId       String   @db.Uuid @map("tenant_id")
+  cotizacionId   String   @db.Uuid @map("cotizacion_id")
+  productoId     String   @db.Uuid @map("producto_id")
+  cantidad       Decimal  @db.Decimal(12, 4)
+  precioUnitario Decimal  @map("precio_unitario") @db.Decimal(12, 2)
+  descuento      Decimal  @default(0) @db.Decimal(12, 2)
+
+  cotizacion Cotizacion @relation(fields: [cotizacionId], references: [id])
+  producto   Producto   @relation(fields: [productoId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, cotizacionId])
+  @@map("cotizacion_items")
+}
+
+model CuentaCobrar {
+  id               String             @id @default(uuid()) @db.Uuid
+  tenantId         String             @db.Uuid @map("tenant_id")
+  ventaId          String             @db.Uuid @map("venta_id") @unique
+  clienteId        String             @db.Uuid @map("cliente_id")
+  sucursalId       String             @db.Uuid @map("sucursal_id")
+  montoTotal       Decimal            @map("monto_total") @db.Decimal(14, 2)
+  montoCobrado     Decimal            @default(0) @map("monto_cobrado") @db.Decimal(14, 2)
+  fechaVencimiento DateTime           @map("fecha_vencimiento") @db.Date
+  estado           EstadoCuentaCobrar @default(al_dia)
+  createdAt        DateTime           @default(now()) @map("created_at")
+  updatedAt        DateTime           @updatedAt @map("updated_at")
+
+  venta    Venta    @relation(fields: [ventaId], references: [id])
+  cliente  Cliente  @relation(fields: [clienteId], references: [id])
+  sucursal Sucursal @relation(fields: [sucursalId], references: [id])
+  pagos    Pago[]   @relation("PagosCxC")
+
+  @@index([tenantId])
+  @@index([tenantId, clienteId])
+  @@index([tenantId, estado])
+  @@index([tenantId, fechaVencimiento])
+  @@map("cuentas_cobrar")
+}
+
+// ============================================================
+// PAGOS (entidad de primera clase)
+// ============================================================
+
+/// Reemplaza el campo metodo_pago embebido en ventas/compras.
+/// Referencia polimórfica: entidad_tipo + entidad_id.
+/// Validar coherencia en Command Handler (no hay FK polimórfica en BD).
+model Pago {
+  id                String      @id @default(uuid()) @db.Uuid
+  tenantId          String      @db.Uuid @map("tenant_id")
+  entidadTipo       EntidadPago @map("entidad_tipo")
+  entidadId         String      @db.Uuid @map("entidad_id")
+  sucursalId        String      @db.Uuid @map("sucursal_id")
+  sesionCajaId      String?     @db.Uuid @map("sesion_caja_id")
+  metodo            MetodoPago
+  monto             Decimal     @db.Decimal(14, 2)
+  referenciaExterna String?     @map("referencia_externa")
+  usuarioId         String      @db.Uuid @map("usuario_id")
+  fecha             DateTime    @default(now())
+  notas             String?
+
+  sucursal   Sucursal    @relation(fields: [sucursalId], references: [id])
+  sesionCaja CajaSesion? @relation(fields: [sesionCajaId], references: [id])
+  usuario    Usuario     @relation(fields: [usuarioId], references: [id])
+
+  venta        Venta?        @relation("PagosVenta", fields: [entidadId], references: [id], map: "pago_venta_fk")
+  compra       Compra?       @relation("PagosCompra", fields: [entidadId], references: [id], map: "pago_compra_fk")
+  cuentaCobrar CuentaCobrar? @relation("PagosCxC", fields: [entidadId], references: [id], map: "pago_cxc_fk")
+  cuentaPagar  CuentaPagar?  @relation("PagosCxP", fields: [entidadId], references: [id], map: "pago_cxp_fk")
+  devolucion   Devolucion?   @relation("PagosDevolucion", fields: [entidadId], references: [id], map: "pago_devolucion_fk")
+
+  @@index([tenantId])
+  @@index([tenantId, entidadTipo, entidadId])
+  @@index([tenantId, sesionCajaId])
+  @@index([tenantId, fecha])
+  @@map("pagos")
+}
+
+// ============================================================
+// CAJA
+// ============================================================
+
+model CajaSesion {
+  id                String    @id @default(uuid()) @db.Uuid
+  tenantId          String    @db.Uuid @map("tenant_id")
+  sucursalId        String    @db.Uuid @map("sucursal_id")
+  montoApertura     Decimal   @map("monto_apertura") @db.Decimal(14, 2)
+  montoCierre       Decimal?  @map("monto_cierre") @db.Decimal(14, 2)  // Calculado por sistema
+  montoFisico       Decimal?  @map("monto_fisico") @db.Decimal(14, 2)  // Contado por cajero
+  diferencia        Decimal?  @db.Decimal(14, 2)
+  justificacion     String?
+  fechaApertura     DateTime  @default(now()) @map("fecha_apertura")
+  fechaCierre       DateTime? @map("fecha_cierre")
+  usuarioAperturaId String    @db.Uuid @map("usuario_apertura_id")
+  usuarioCierreId   String?   @db.Uuid @map("usuario_cierre_id")
+  abierta           Boolean   @default(true)
+
+  sucursal    Sucursal         @relation(fields: [sucursalId], references: [id])
+  movimientos CajaMovimiento[]
+  ventas      Venta[]
+  pagos       Pago[]
+
+  @@index([tenantId])
+  @@index([tenantId, sucursalId])
+  @@index([tenantId, sucursalId, abierta])
+  @@map("caja_sesiones")
+}
+
+model CajaMovimiento {
+  id           String             @id @default(uuid()) @db.Uuid
+  tenantId     String             @db.Uuid @map("tenant_id")
+  sesionId     String             @db.Uuid @map("sesion_id")
+  tipo         TipoMovimientoCaja
+  monto        Decimal            @db.Decimal(14, 2)
+  descripcion  String
+  referenciaId String?            @db.Uuid @map("referencia_id")
+  usuarioId    String             @db.Uuid @map("usuario_id")
+  fecha        DateTime           @default(now())
+
+  sesion CajaSesion @relation(fields: [sesionId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, sesionId])
+  @@index([tenantId, fecha])
+  @@map("caja_movimientos")
+}
+
+// ============================================================
+// TRANSFERENCIAS ENTRE SUCURSALES
+// ============================================================
+
+model Transferencia {
+  id                String              @id @default(uuid()) @db.Uuid
+  tenantId          String              @db.Uuid @map("tenant_id")
+  sucursalOrigenId  String              @db.Uuid @map("sucursal_origen_id")
+  sucursalDestinoId String              @db.Uuid @map("sucursal_destino_id")
+  estado            EstadoTransferencia @default(SOLICITADA)
+  solicitanteId     String              @db.Uuid @map("solicitante_id")
+  despachadorId     String?             @db.Uuid @map("despachador_id")
+  receptorId        String?             @db.Uuid @map("receptor_id")
+  fechaSolicitud    DateTime            @default(now()) @map("fecha_solicitud")
+  fechaDespacho     DateTime?           @map("fecha_despacho")
+  fechaRecepcion    DateTime?           @map("fecha_recepcion")
+  notas             String?
+  motivoRechazo     String?             @map("motivo_rechazo")
+  createdAt         DateTime            @default(now()) @map("created_at")
+  updatedAt         DateTime            @updatedAt @map("updated_at")
+
+  sucursalOrigen  Sucursal  @relation("TransferenciaOrigen", fields: [sucursalOrigenId], references: [id])
+  sucursalDestino Sucursal  @relation("TransferenciaDestino", fields: [sucursalDestinoId], references: [id])
+  solicitante     Usuario   @relation("TransferenciaSolicitante", fields: [solicitanteId], references: [id])
+  despachador     Usuario?  @relation("TransferenciasDespachador", fields: [despachadorId], references: [id])
+  receptor        Usuario?  @relation("TransferenciasReceptor", fields: [receptorId], references: [id])
+  items           TransferenciaItem[]
+
+  @@index([tenantId])
+  @@index([tenantId, sucursalOrigenId])
+  @@index([tenantId, sucursalDestinoId])
+  @@index([tenantId, estado])
+  @@index([tenantId, fechaSolicitud])
+  @@map("transferencias")
+}
+
+model TransferenciaItem {
+  id                 String   @id @default(uuid()) @db.Uuid
+  tenantId           String   @db.Uuid @map("tenant_id")
+  transferenciaId    String   @db.Uuid @map("transferencia_id")
+  productoId         String   @db.Uuid @map("producto_id")
+  loteId             String?  @db.Uuid @map("lote_id")
+  cantidadSolicitada Decimal  @map("cantidad_solicitada") @db.Decimal(12, 4)
+  cantidadDespachada Decimal? @map("cantidad_despachada") @db.Decimal(12, 4)
+  cantidadRecibida   Decimal? @map("cantidad_recibida") @db.Decimal(12, 4)
+  motivoDiscrepancia String?  @map("motivo_discrepancia")
+
+  transferencia Transferencia @relation(fields: [transferenciaId], references: [id])
+  producto      Producto      @relation(fields: [productoId], references: [id])
+  lote          Lote?         @relation(fields: [loteId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, transferenciaId])
+  @@index([tenantId, productoId])
+  @@map("transferencia_items")
+}
+
+// ============================================================
+// PEDIDOS A PROVEEDORES
+// ============================================================
+
+model Pedido {
+  id                   String       @id @default(uuid()) @db.Uuid
+  tenantId             String       @db.Uuid @map("tenant_id")
+  sucursalId           String       @db.Uuid @map("sucursal_id")
+  proveedorId          String       @db.Uuid @map("proveedor_id")
+  fechaPedido          DateTime     @default(now()) @map("fecha_pedido")
+  fechaEsperada        DateTime?    @map("fecha_esperada") @db.Date
+  fechaLlegadaEstimada DateTime?    @map("fecha_llegada_estimada")
+  tracking             String?
+  transportista        String?
+  estado               EstadoPedido @default(BORRADOR)
+  moneda               Moneda       @default(BOB)
+  tipoCambioEstimado   Decimal?     @map("tipo_cambio_estimado") @db.Decimal(12, 6)
+  tipoCambioRecepcion  Decimal?     @map("tipo_cambio_recepcion") @db.Decimal(12, 6)
+  notas                String?
+  motivoCancelacion    String?      @map("motivo_cancelacion")
+  compraId             String?      @db.Uuid @map("compra_id")
+  creadoPorId          String       @db.Uuid @map("creado_por_id")
+  createdAt            DateTime     @default(now()) @map("created_at")
+  updatedAt            DateTime     @updatedAt @map("updated_at")
+
+  sucursal  Sucursal    @relation(fields: [sucursalId], references: [id])
+  proveedor Proveedor   @relation(fields: [proveedorId], references: [id])
+  creadoPor Usuario     @relation("PedidoCreador", fields: [creadoPorId], references: [id])
+  compras   Compra[]
+  items     PedidoItem[]
+
+  @@index([tenantId])
+  @@index([tenantId, sucursalId])
+  @@index([tenantId, proveedorId])
+  @@index([tenantId, estado])
+  @@index([tenantId, fechaPedido])
+  @@map("pedidos")
+}
+
+model PedidoItem {
+  id                    String   @id @default(uuid()) @db.Uuid
+  tenantId              String   @db.Uuid @map("tenant_id")
+  pedidoId              String   @db.Uuid @map("pedido_id")
+  productoId            String   @db.Uuid @map("producto_id")
+  cantidadPedida        Decimal  @map("cantidad_pedida") @db.Decimal(12, 4)
+  cantidadRecibida      Decimal  @default(0) @map("cantidad_recibida") @db.Decimal(12, 4)
+  precioUnitOrigen      Decimal? @map("precio_unit_origen") @db.Decimal(12, 4)
+  precioUnitBobEstimado Decimal? @map("precio_unit_bob_estimado") @db.Decimal(12, 4)
+
+  pedido   Pedido   @relation(fields: [pedidoId], references: [id])
+  producto Producto @relation(fields: [productoId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, pedidoId])
+  @@map("pedido_items")
+}
+
+// ============================================================
+// DEVOLUCIONES DE CLIENTES
+// ============================================================
+
+model Devolucion {
+  id         String           @id @default(uuid()) @db.Uuid
+  tenantId   String           @db.Uuid @map("tenant_id")
+  sucursalId String           @db.Uuid @map("sucursal_id")
+  ventaId    String?          @db.Uuid @map("venta_id")
+  clienteId  String?          @db.Uuid @map("cliente_id")
+  fecha      DateTime         @default(now())
+  tipo       TipoDevolucion
+  motivo     String
+  estado     EstadoDevolucion @default(PENDIENTE)
+  usuarioId  String           @db.Uuid @map("usuario_id")
+  notas      String?
+  createdAt  DateTime         @default(now()) @map("created_at")
+  updatedAt  DateTime         @updatedAt @map("updated_at")
+
+  sucursal Sucursal         @relation(fields: [sucursalId], references: [id])
+  venta    Venta?           @relation(fields: [ventaId], references: [id])
+  cliente  Cliente?         @relation(fields: [clienteId], references: [id])
+  usuario  Usuario          @relation(fields: [usuarioId], references: [id])
+  items    DevolucionItem[]
+  cambios  DevolucionCambio[]
+  pagos    Pago[]           @relation("PagosDevolucion")
+
+  @@index([tenantId])
+  @@index([tenantId, sucursalId])
+  @@index([tenantId, ventaId])
+  @@index([tenantId, clienteId])
+  @@index([tenantId, estado])
+  @@map("devoluciones")
+}
+
+model DevolucionItem {
+  id           String              @id @default(uuid()) @db.Uuid
+  tenantId     String              @db.Uuid @map("tenant_id")
+  devolucionId String              @db.Uuid @map("devolucion_id")
+  productoId   String              @db.Uuid @map("producto_id")
+  cantidad     Decimal             @db.Decimal(12, 4)
+  condicion    CondicionDevolucion
+  loteId       String?             @db.Uuid @map("lote_id")
+
+  devolucion Devolucion @relation(fields: [devolucionId], references: [id])
+  producto   Producto   @relation(fields: [productoId], references: [id])
+  lote       Lote?      @relation(fields: [loteId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, devolucionId])
+  @@map("devolucion_items")
+}
+
+model DevolucionCambio {
+  id             String   @id @default(uuid()) @db.Uuid
+  tenantId       String   @db.Uuid @map("tenant_id")
+  devolucionId   String   @db.Uuid @map("devolucion_id")
+  productoId     String   @db.Uuid @map("producto_id")
+  cantidad       Decimal  @db.Decimal(12, 4)
+  precioUnitario Decimal  @map("precio_unitario") @db.Decimal(12, 2)
+
+  devolucion Devolucion @relation(fields: [devolucionId], references: [id])
+  producto   Producto   @relation(fields: [productoId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, devolucionId])
+  @@map("devolucion_cambios")
+}
+
+// ============================================================
+// ANULACIONES (AUDITORÍA)
+// ============================================================
+
+/// Registro append-only. Nunca se borra, nunca se actualiza.
+/// Considerar REVOKE UPDATE en PostgreSQL para esta tabla.
+model Anulacion {
+  id                String           @id @default(uuid()) @db.Uuid
+  tenantId          String           @db.Uuid @map("tenant_id")
+  entidadTipo       EntidadAnulacion @map("entidad_tipo")
+  entidadId         String           @db.Uuid @map("entidad_id")
+  usuarioId         String           @db.Uuid @map("usuario_id")
+  sucursalId        String           @db.Uuid @map("sucursal_id")
+  motivo            String
+  fecha             DateTime         @default(now())
+  detallesReversion Json             @map("detalles_reversion") @db.Json
+
+  usuario  Usuario  @relation(fields: [usuarioId], references: [id])
+  sucursal Sucursal @relation(fields: [sucursalId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, entidadTipo, entidadId])
+  @@index([tenantId, fecha])
+  @@index([tenantId, usuarioId])
+  @@map("anulaciones")
+}
+
+// ============================================================
+// CHAT INTERNO (Fase 3)
+// ============================================================
+
+/// Solo activo cuando "chat" está en configuracion.modulosActivos.
+model ChatMensaje {
+  id                String          @id @default(uuid()) @db.Uuid
+  tenantId          String          @db.Uuid @map("tenant_id")
+  remitenteId       String          @db.Uuid @map("remitente_id")
+  sucursalDestinoId String?         @db.Uuid @map("sucursal_destino_id")
+  destinatarioId    String?         @db.Uuid @map("destinatario_id")
+  contenido         String
+  tipo              TipoChatMensaje @default(texto)
+  referenciaId      String?         @db.Uuid @map("referencia_id")
+  leido             Boolean         @default(false)
+  createdAt         DateTime        @default(now()) @map("created_at")
+
+  remitente       Usuario   @relation(fields: [remitenteId], references: [id])
+  sucursalDestino Sucursal? @relation("MensajesSucursal", fields: [sucursalDestinoId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, sucursalDestinoId])
+  @@index([tenantId, remitenteId])
+  @@index([tenantId, destinatarioId])
+  @@index([tenantId, createdAt])
+  @@map("chat_mensajes")
+}
+
+// ============================================================
+// AUTH — Tokens (Sin RLS — tabla global por usuario)
+// ============================================================
+
+/// Almacena refresh tokens hasheados para rotación segura.
+/// Un token usado no se puede reutilizar (isUsed = true).
+model RefreshToken {
+  id        String   @id @default(uuid()) @db.Uuid
+  tokenHash String   @unique @map("token_hash")
+  usuarioId String   @db.Uuid @map("usuario_id")
+  tenantId  String   @db.Uuid @map("tenant_id")
+  role      String
+  expiresAt DateTime @map("expires_at")
+  isUsed    Boolean  @default(false) @map("is_used")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([usuarioId])
+  @@index([tenantId])
+  @@map("refresh_tokens")
+}

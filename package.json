@@ -1,0 +1,23 @@
+{
+  "name": "qori-erp",
+  "private": true,
+  "scripts": {
+    "dev:api": "pnpm --filter @qori/api dev",
+    "dev:desktop": "pnpm --filter @qori/desktop dev",
+    "build:api": "pnpm --filter @qori/api build",
+    "build:desktop": "pnpm --filter @qori/desktop build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "sync:bruno": "node scripts/sync-bruno.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["@prisma/client", "@prisma/engines", "esbuild", "prisma"]
+  }
+}
